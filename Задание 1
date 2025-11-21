@@ -1,0 +1,454 @@
+"""
+Приложение «Социальная сеть» (задание 1, Модуль 18, NoSQL MongoDB).
+
+Функционал:
+- Вход по логину и паролю
+- Добавление пользователя (регистрация)
+- Удаление пользователя
+- Редактирование информации о пользователе
+- Поиск пользователя по ФИО
+- Просмотр информации о пользователе
+- Просмотр всех друзей пользователя
+- Просмотр всех постов пользователя
+
+Хранение данных: MongoDB (коллекции users и posts).
+"""
+
+from datetime import datetime
+from getpass import getpass
+
+from pymongo import MongoClient
+from bson.objectid import ObjectId
+
+
+# ---------- НАСТРОЙКИ ПОДКЛЮЧЕНИЯ К MONGODB ----------
+
+MONGO_URI = "mongodb://localhost:27017"
+DB_NAME = "social_network_db"
+
+
+def get_db():
+    """Подключение к базе данных и возврат объекта db."""
+    client = MongoClient(MONGO_URI)
+    return client[DB_NAME]
+
+
+db = get_db()
+users_collection = db["users"]
+posts_collection = db["posts"]
+
+
+# ---------- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ----------
+
+def input_non_empty(prompt: str) -> str:
+    """Запрос строки, запрещая пустой ввод."""
+    while True:
+        value = input(prompt).strip()
+        if value:
+            return value
+        print("Поле не может быть пустым. Повторите ввод.")
+
+
+def find_user_by_login(login: str):
+    """Найти пользователя по логину."""
+    return users_collection.find_one({"login": login})
+
+
+def find_user_by_id(user_id: ObjectId):
+    """Найти пользователя по ObjectId."""
+    return users_collection.find_one({"_id": user_id})
+
+
+def print_user_info(user_doc: dict):
+    """Красивый вывод информации о пользователе."""
+    if not user_doc:
+        print("Пользователь не найден.")
+        return
+
+    print("\n--- Информация о пользователе ---")
+    print(f"ID:       {user_doc.get('_id')}")
+    print(f"Логин:    {user_doc.get('login')}")
+    print(f"ФИО:      {user_doc.get('full_name')}")
+    print(f"Возраст:  {user_doc.get('age')}")
+    print(f"Город:    {user_doc.get('city')}")
+    print(f"Друзей:   {len(user_doc.get('friends', []))}")
+    print("---------------------------------")
+
+
+def choose_user_by_full_name():
+    """Поиск пользователя по ФИО (поле full_name)."""
+    fio = input_non_empty("Введите ФИО пользователя для поиска: ")
+    # Поиск по вхождению подстроки в ФИО (регистронезависимо)
+    cursor = users_collection.find({
+        "full_name": {"$regex": fio, "$options": "i"}
+    })
+
+    users = list(cursor)
+    if not users:
+        print("Пользователь с таким ФИО не найден.")
+        return None
+
+    print("\nНайденные пользователи:")
+    for idx, u in enumerate(users, start=1):
+        print(f"{idx}. {u.get('full_name')} (логин: {u.get('login')}, id: {u.get('_id')})")
+
+    while True:
+        try:
+            choice = int(input("Выберите номер пользователя (0 - отмена): "))
+        except ValueError:
+            print("Введите число.")
+            continue
+
+        if choice == 0:
+            return None
+
+        if 1 <= choice <= len(users):
+            return users[choice - 1]
+
+        print("Некорректный выбор, попробуйте снова.")
+
+
+# ---------- РЕГИСТРАЦИЯ И АВТОРИЗАЦИЯ ----------
+
+def register_user():
+    """Добавление нового пользователя (регистрация)."""
+    print("\n=== Регистрация нового пользователя ===")
+    while True:
+        login = input_non_empty("Придумайте логин: ")
+        if find_user_by_login(login):
+            print("Такой логин уже существует. Выберите другой.")
+        else:
+            break
+
+    password = getpass("Придумайте пароль: ")
+    password_confirm = getpass("Повторите пароль: ")
+
+    if password != password_confirm:
+        print("Пароли не совпадают. Регистрация отменена.")
+        return None
+
+    full_name = input_non_empty("Введите ФИО: ")
+    age_str = input("Введите возраст (число, можно оставить пустым): ").strip()
+    city = input("Введите город (можно оставить пустым): ").strip()
+
+    age = None
+    if age_str:
+        try:
+            age = int(age_str)
+        except ValueError:
+            print("Возраст введён некорректно, будет сохранён как неизвестный.")
+            age = None
+
+    user_doc = {
+        "login": login,
+        "password": password,  # в учебном примере не хэшируем
+        "full_name": full_name,
+        "age": age,
+        "city": city,
+        "friends": []  # список ObjectId друзей
+    }
+
+    result = users_collection.insert_one(user_doc)
+    print(f"Пользователь успешно зарегистрирован. Его id: {result.inserted_id}")
+    return users_collection.find_one({"_id": result.inserted_id})
+
+
+def login_user():
+    """Вход по логину и паролю."""
+    print("\n=== Вход в систему ===")
+    login = input_non_empty("Логин: ")
+    password = getpass("Пароль: ")
+
+    user = find_user_by_login(login)
+    if not user or user.get("password") != password:
+        print("Неверный логин или пароль.")
+        return None
+
+    print(f"\nДобро пожаловать, {user.get('full_name')}!")
+    return user
+
+
+# ---------- ОПЕРАЦИИ С ПОЛЬЗОВАТЕЛЕМ ----------
+
+def edit_user_info(current_user: dict):
+    """Редактирование информации о текущем пользователе."""
+    print("\n=== Редактирование информации о пользователе ===")
+    print("Нажмите Enter, чтобы оставить поле без изменений.")
+
+    new_full_name = input(f"ФИО [{current_user.get('full_name')}]: ").strip()
+    new_age_str = input(f"Возраст [{current_user.get('age')}]: ").strip()
+    new_city = input(f"Город [{current_user.get('city')}]: ").strip()
+
+    update_fields = {}
+
+    if new_full_name:
+        update_fields["full_name"] = new_full_name
+    if new_age_str:
+        try:
+            update_fields["age"] = int(new_age_str)
+        except ValueError:
+            print("Возраст введён некорректно, будет проигнорирован.")
+    if new_city:
+        update_fields["city"] = new_city
+
+    if not update_fields:
+        print("Ничего не изменено.")
+        return current_user
+
+    users_collection.update_one(
+        {"_id": current_user["_id"]},
+        {"$set": update_fields}
+    )
+
+    updated_user = find_user_by_id(current_user["_id"])
+    print("Информация обновлена.")
+    print_user_info(updated_user)
+    return updated_user
+
+
+def delete_user(current_user: dict):
+    """Удаление текущего пользователя."""
+    print("\n=== Удаление пользователя ===")
+    confirm = input("Вы уверены, что хотите удалить аккаунт? (yes/no): ").strip().lower()
+    if confirm != "yes":
+        print("Удаление отменено.")
+        return False
+
+    # Удаляем пользователя из списков друзей других пользователей
+    users_collection.update_many(
+        {"friends": current_user["_id"]},
+        {"$pull": {"friends": current_user["_id"]}}
+    )
+
+    # Удаляем все посты пользователя
+    posts_collection.delete_many({"user_id": current_user["_id"]})
+
+    # Удаляем самого пользователя
+    users_collection.delete_one({"_id": current_user["_id"]})
+    print("Аккаунт и все посты удалены.")
+    return True
+
+
+def view_user_info_menu():
+    """Просмотр информации о пользователе:
+       - по своему аккаунту
+       - по выбору через поиск ФИО."""
+    print("\n1. Просмотреть свою информацию")
+    print("2. Найти пользователя по ФИО и посмотреть информации о нём")
+    choice = input("Выберите пункт (1–2, Enter для отмены): ").strip()
+    if choice == "1":
+        print("Сначала войдите в систему через основное меню.")
+    elif choice == "2":
+        user = choose_user_by_full_name()
+        if user:
+            print_user_info(user)
+
+
+def view_friends(current_user: dict):
+    """Просмотр всех друзей текущего пользователя."""
+    friends_ids = current_user.get("friends", [])
+    if not friends_ids:
+        print("\nУ вас пока нет друзей.")
+        return
+
+    friends = users_collection.find({"_id": {"$in": friends_ids}})
+    print("\n=== Ваши друзья ===")
+    for f in friends:
+        print(f"- {f.get('full_name')} (логин: {f.get('login')}, id: {f.get('_id')})")
+
+
+def add_friend(current_user: dict):
+    """Добавление друга текущему пользователю."""
+    print("\n=== Добавление друга ===")
+    # Ищем другого пользователя по ФИО
+    user_to_add = choose_user_by_full_name()
+    if not user_to_add:
+        return
+
+    if user_to_add["_id"] == current_user["_id"]:
+        print("Нельзя добавить в друзья самого себя.")
+        return
+
+    if user_to_add["_id"] in current_user.get("friends", []):
+        print("Этот пользователь уже у вас в друзьях.")
+        return
+
+    users_collection.update_one(
+        {"_id": current_user["_id"]},
+        {"$addToSet": {"friends": user_to_add["_id"]}}
+    )
+
+    print(f"Пользователь {user_to_add.get('full_name')} добавлен в друзья.")
+
+
+def remove_friend(current_user: dict):
+    """Удаление друга из списка друзей текущего пользователя."""
+    print("\n=== Удаление друга ===")
+    friends_ids = current_user.get("friends", [])
+    if not friends_ids:
+        print("У вас нет друзей для удаления.")
+        return
+
+    friends = list(users_collection.find({"_id": {"$in": friends_ids}}))
+    print("Ваши друзья:")
+    for idx, f in enumerate(friends, start=1):
+        print(f"{idx}. {f.get('full_name')} (логин: {f.get('login')}, id: {f.get('_id')})")
+
+    while True:
+        try:
+            choice = int(input("Выберите номер друга для удаления (0 - отмена): "))
+        except ValueError:
+            print("Введите число.")
+            continue
+
+        if choice == 0:
+            return
+
+        if 1 <= choice <= len(friends):
+            friend_to_remove = friends[choice - 1]
+            users_collection.update_one(
+                {"_id": current_user["_id"]},
+                {"$pull": {"friends": friend_to_remove["_id"]}}
+            )
+            print(f"Пользователь {friend_to_remove.get('full_name')} удалён из друзей.")
+            return
+
+        print("Некорректный выбор, попробуйте снова.")
+
+
+# ---------- ОПЕРАЦИИ С ПОСТАМИ ----------
+
+def add_post(current_user: dict):
+    """Добавление поста текущим пользователем."""
+    print("\n=== Добавление поста ===")
+    text = input_non_empty("Введите текст поста: ")
+
+    post_doc = {
+        "user_id": current_user["_id"],
+        "text": text,
+        "created_at": datetime.utcnow()
+    }
+    posts_collection.insert_one(post_doc)
+    print("Пост успешно добавлен.")
+
+
+def view_posts_of_user():
+    """Просмотр всех постов выбранного пользователя (по ФИО)."""
+    print("\n=== Просмотр постов пользователя ===")
+    user = choose_user_by_full_name()
+    if not user:
+        return
+
+    cursor = posts_collection.find({"user_id": user["_id"]}).sort("created_at", -1)
+    posts = list(cursor)
+
+    if not posts:
+        print("У пользователя нет постов.")
+        return
+
+    print(f"\nПосты пользователя {user.get('full_name')}:")
+    for p in posts:
+        dt_str = p.get("created_at").strftime("%Y-%m-%d %H:%M:%S") if p.get("created_at") else "неизвестно"
+        print("----------------------------------------")
+        print(f"Дата: {dt_str}")
+        print(f"Текст: {p.get('text')}")
+    print("----------------------------------------")
+
+
+def view_my_posts(current_user: dict):
+    """Просмотр всех своих постов."""
+    cursor = posts_collection.find({"user_id": current_user["_id"]}).sort("created_at", -1)
+    posts = list(cursor)
+    if not posts:
+        print("\nУ вас нет постов.")
+        return
+
+    print(f"\nВаши посты ({len(posts)}):")
+    for p in posts:
+        dt_str = p.get("created_at").strftime("%Y-%m-%d %H:%M:%S") if p.get("created_at") else "неизвестно"
+        print("----------------------------------------")
+        print(f"Дата: {dt_str}")
+        print(f"Текст: {p.get('text')}")
+    print("----------------------------------------")
+
+
+# ---------- МЕНЮ ----------
+
+def user_menu(current_user: dict):
+    """Меню после входа пользователем в систему."""
+    while True:
+        print("\n===== МЕНЮ ПОЛЬЗОВАТЕЛЯ =====")
+        print("1. Просмотреть свою информацию")
+        print("2. Редактировать свою информацию")
+        print("3. Удалить свой аккаунт")
+        print("4. Найти пользователя по ФИО и просмотреть его информацию")
+        print("5. Просмотреть список своих друзей")
+        print("6. Добавить друга")
+        print("7. Удалить друга")
+        print("8. Добавить пост")
+        print("9. Просмотреть свои посты")
+        print("10. Просмотреть посты другого пользователя")
+        print("0. Выйти из аккаунта")
+        choice = input("Выберите пункт меню: ").strip()
+
+        if choice == "1":
+            print_user_info(current_user)
+        elif choice == "2":
+            current_user = edit_user_info(current_user)
+        elif choice == "3":
+            if delete_user(current_user):
+                return
+        elif choice == "4":
+            user = choose_user_by_full_name()
+            if user:
+                print_user_info(user)
+        elif choice == "5":
+            # Обновляем текущего пользователя на случай изменения друзей
+            current_user = find_user_by_id(current_user["_id"])
+            view_friends(current_user)
+        elif choice == "6":
+            current_user = find_user_by_id(current_user["_id"])
+            add_friend(current_user)
+        elif choice == "7":
+            current_user = find_user_by_id(current_user["_id"])
+            remove_friend(current_user)
+        elif choice == "8":
+            add_post(current_user)
+        elif choice == "9":
+            view_my_posts(current_user)
+        elif choice == "10":
+            view_posts_of_user()
+        elif choice == "0":
+            print("Выход из аккаунта.")
+            return
+        else:
+            print("Некорректный пункт меню, попробуйте ещё раз.")
+
+
+def main_menu():
+    """Главное меню приложения."""
+    print("=== Приложение «Социальная сеть» (MongoDB) ===")
+    while True:
+        print("\n===== ГЛАВНОЕ МЕНЮ =====")
+        print("1. Войти (логин и пароль)")
+        print("2. Зарегистрировать нового пользователя")
+        print("0. Выход")
+        choice = input("Выберите пункт меню: ").strip()
+
+        if choice == "1":
+            user = login_user()
+            if user:
+                user_menu(user)
+        elif choice == "2":
+            new_user = register_user()
+            if new_user:
+                user_menu(new_user)
+        elif choice == "0":
+            print("Завершение работы приложения.")
+            break
+        else:
+            print("Некорректный пункт меню, попробуйте ещё раз.")
+
+
+if __name__ == "__main__":
+    main_menu()
