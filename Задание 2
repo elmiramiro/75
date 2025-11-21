@@ -1,0 +1,266 @@
+"""
+Приложение «Литературный музей» (задание 2, Модуль 18, NoSQL MongoDB).
+
+Функционал по заданию:
+- Вход по логину и паролю;
+- Добавление экспоната;
+- Удаление экспоната;
+- Редактирование информации об экспонате;
+- Просмотр полной информации об экспонате;
+- Вывод информации о всех экспонатах;
+- Просмотр информации о людях, имеющих отношение к конкретному экспонату;
+- Просмотр информации об экспонатах, имеющих отношение к конкретному человеку;
+- Просмотр набора экспонатов на основе некоторого критерия (например, показать все книжные экспонаты).
+
+Данные хранятся в MongoDB в коллекциях:
+- users      — пользователи приложения (для входа);
+- persons    — люди, имеющие отношение к экспонатам;
+- exhibits   — экспонаты музея, с ссылками на persons.
+"""
+
+from datetime import datetime
+from getpass import getpass
+
+from pymongo import MongoClient
+from bson.objectid import ObjectId
+
+
+# ---------- НАСТРОЙКИ ПОДКЛЮЧЕНИЯ К MONGODB ----------
+
+MONGO_URI = "mongodb://localhost:27017"
+DB_NAME = "literary_museum_db"
+
+
+def get_db():
+    """Подключение к базе данных и возврат объекта db."""
+    client = MongoClient(MONGO_URI)
+    return client[DB_NAME]
+
+
+db = get_db()
+users_collection = db["users"]
+persons_collection = db["persons"]
+exhibits_collection = db["exhibits"]
+
+
+# ---------- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ----------
+
+def input_non_empty(prompt: str) -> str:
+    """Запрос строки, запрещая пустой ввод."""
+    while True:
+        value = input(prompt).strip()
+        if value:
+            return value
+        print("Поле не может быть пустым. Повторите ввод.")
+
+
+def yes_no(prompt: str) -> bool:
+    """Запрос ответа yes/no. Возвращает True для yes, False для no."""
+    while True:
+        ans = input(prompt + " (yes/no): ").strip().lower()
+        if ans in ("yes", "y"):
+            return True
+        if ans in ("no", "n"):
+            return False
+        print("Введите yes или no.")
+
+
+def find_user_by_login(login: str):
+    """Найти пользователя по логину."""
+    return users_collection.find_one({"login": login})
+
+
+def print_person_info(person: dict):
+    """Вывод информации о человеке."""
+    if not person:
+        print("Человек не найден.")
+        return
+    print(f"- {person.get('name')} "
+          f"(годы жизни: {person.get('birth_year')}–{person.get('death_year')}, "
+          f"id: {person.get('_id')})")
+    if person.get("description"):
+        print(f"  Описание: {person.get('description')}")
+
+
+def print_exhibit_short(exhibit: dict):
+    """Краткий вывод экспоната."""
+    print(f"- {exhibit.get('title')} "
+          f"(тип: {exhibit.get('type')}, год: {exhibit.get('year')}, id: {exhibit.get('_id')})")
+
+
+def print_exhibit_full(exhibit: dict):
+    """Полная информация об экспонате, включая людей."""
+    if not exhibit:
+        print("Экспонат не найден.")
+        return
+
+    print("\n=== Полная информация об экспонате ===")
+    print(f"ID:         {exhibit.get('_id')}")
+    print(f"Название:   {exhibit.get('title')}")
+    print(f"Тип:        {exhibit.get('type')}")
+    print(f"Год:        {exhibit.get('year')}")
+    print(f"Описание:   {exhibit.get('description')}")
+    print(f"Локация:    {exhibit.get('location')}")
+    print(f"Добавлен:   {exhibit.get('created_at')}")
+    persons_ids = exhibit.get("persons", [])
+
+    if persons_ids:
+        print("\nСвязанные люди:")
+        persons = persons_collection.find({"_id": {"$in": persons_ids}})
+        for p in persons:
+            print_person_info(p)
+    else:
+        print("\nСвязанных людей нет.")
+    print("=======================================")
+
+
+def choose_exhibit_by_title():
+    """Выбор экспоната по названию (поиск по подстроке)."""
+    query = input_non_empty("Введите часть названия экспоната: ")
+    cursor = exhibits_collection.find(
+        {"title": {"$regex": query, "$options": "i"}}
+    )
+    exhibits = list(cursor)
+    if not exhibits:
+        print("Экспонатов с таким названием не найдено.")
+        return None
+
+    print("\nНайденные экспонаты:")
+    for idx, ex in enumerate(exhibits, start=1):
+        print(f"{idx}. {ex.get('title')} (тип: {ex.get('type')}, id: {ex.get('_id')})")
+
+    while True:
+        try:
+            choice = int(input("Выберите номер экспоната (0 - отмена): "))
+        except ValueError:
+            print("Введите число.")
+            continue
+
+        if choice == 0:
+            return None
+        if 1 <= choice <= len(exhibits):
+            return exhibits[choice - 1]
+        print("Некорректный выбор, попробуйте снова.")
+
+
+def choose_person_by_name():
+    """Выбор человека по имени (поиск по подстроке)."""
+    query = input_non_empty("Введите имя/фамилию человека: ")
+    cursor = persons_collection.find(
+        {"name": {"$regex": query, "$options": "i"}}
+    )
+    persons = list(cursor)
+    if not persons:
+        print("Людей с таким именем не найдено.")
+        return None
+
+    print("\nНайденные люди:")
+    for idx, p in enumerate(persons, start=1):
+        print(f"{idx}. {p.get('name')} (годы жизни: {p.get('birth_year')}–{p.get('death_year')}, "
+              f"id: {p.get('_id')})")
+
+    while True:
+        try:
+            choice = int(input("Выберите номер (0 - отмена): "))
+        except ValueError:
+            print("Введите число.")
+            continue
+
+        if choice == 0:
+            return None
+        if 1 <= choice <= len(persons):
+            return persons[choice - 1]
+        print("Некорректный выбор, попробуйте снова.")
+
+
+# ---------- РЕГИСТРАЦИЯ И ВХОД ----------
+
+def register_user():
+    """Регистрация нового пользователя."""
+    print("\n=== Регистрация пользователя ===")
+    while True:
+        login = input_non_empty("Придумайте логин: ")
+        if find_user_by_login(login):
+            print("Такой логин уже существует. Выберите другой.")
+        else:
+            break
+
+    password = getpass("Придумайте пароль: ")
+    password_confirm = getpass("Повторите пароль: ")
+
+    if password != password_confirm:
+        print("Пароли не совпадают. Регистрация отменена.")
+        return None
+
+    user_doc = {
+        "login": login,
+        "password": password,  # в учебном примере не хэшируем
+        "created_at": datetime.utcnow()
+    }
+    users_collection.insert_one(user_doc)
+    print("Пользователь успешно зарегистрирован.")
+    return user_doc
+
+
+def login_user():
+    """Вход по логину и паролю."""
+    print("\n=== Вход в систему ===")
+    login = input_non_empty("Логин: ")
+    password = getpass("Пароль: ")
+
+    user = find_user_by_login(login)
+    if not user or user.get("password") != password:
+        print("Неверный логин или пароль.")
+        return None
+
+    print(f"Добро пожаловать, {user.get('login')}!")
+    return user
+
+
+# ---------- ОПЕРАЦИИ С ЛЮДЬМИ (persons) ----------
+
+def create_person_interactive():
+    """Интерактивное создание записи о человеке."""
+    print("\n=== Добавление человека (персоны) ===")
+    name = input_non_empty("ФИО / имя человека: ")
+    by_str = input("Год рождения (можно пусто): ").strip()
+    dy_str = input("Год смерти (можно пусто): ").strip()
+    descr = input("Краткое описание (можно пусто): ").strip()
+
+    birth_year = None
+    death_year = None
+
+    if by_str:
+        try:
+            birth_year = int(by_str)
+        except ValueError:
+            print("Год рождения введён некорректно, будет пропущен.")
+    if dy_str:
+        try:
+            death_year = int(dy_str)
+        except ValueError:
+            print("Год смерти введён некорректно, будет пропущен.")
+
+    person_doc = {
+        "name": name,
+        "birth_year": birth_year,
+        "death_year": death_year,
+        "description": descr
+    }
+    result = persons_collection.insert_one(person_doc)
+    print(f"Человек добавлен (id: {result.inserted_id})")
+    return persons_collection.find_one({"_id": result.inserted_id})
+
+
+def select_persons_for_exhibit():
+    """Выбор/создание людей для привязки к экспонату."""
+    selected_ids = []
+
+    while True:
+        print("\n=== Работа со связанными людьми ===")
+        print("1. Выбрать существующего человека")
+        print("2. Добавить нового человека")
+        print("0. Закончить выбор")
+        choice = input("Ваш выбор: ").strip()
+
+        if choice == "1":
