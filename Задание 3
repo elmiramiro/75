@@ -1,0 +1,467 @@
+"""
+Приложение «Записная книжка» (задание 3, Модуль 18, NoSQL MongoDB).
+
+Функционал (по условию задания):
+- Вход по логину и паролю;
+- Добавление заметки (заметка может состоять из нескольких частей);
+- Удаление заметки;
+- Редактирование заметки;
+- Просмотр заметки (если несколько частей – показать все части);
+- Показ всех заметок;
+- Просмотр заметок за определённый период времени;
+- Отображение заметок, содержащих набор заданных слов.
+
+Данные хранятся в MongoDB:
+- users   — пользователи приложения;
+- notes   — заметки, привязанные к пользователям.
+"""
+
+from datetime import datetime
+from getpass import getpass
+
+from pymongo import MongoClient
+from bson.objectid import ObjectId
+
+
+# ---------- НАСТРОЙКИ ПОДКЛЮЧЕНИЯ К MONGODB ----------
+
+MONGO_URI = "mongodb://localhost:27017"
+DB_NAME = "notebook_db"
+
+
+def get_db():
+    """Подключение к базе данных и возврат объекта db."""
+    client = MongoClient(MONGO_URI)
+    return client[DB_NAME]
+
+
+db = get_db()
+users_collection = db["users"]
+notes_collection = db["notes"]
+
+
+# ---------- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ----------
+
+def input_non_empty(prompt: str) -> str:
+    """Запрос строки, запрещая пустой ввод."""
+    while True:
+        value = input(prompt).strip()
+        if value:
+            return value
+        print("Поле не может быть пустым. Повторите ввод.")
+
+
+def yes_no(prompt: str) -> bool:
+    """Запрос ответа yes/no. Возвращает True для yes, False для no."""
+    while True:
+        ans = input(prompt + " (yes/no): ").strip().lower()
+        if ans in ("yes", "y"):
+            return True
+        if ans in ("no", "n"):
+            return False
+        print("Введите yes или no.")
+
+
+def find_user_by_login(login: str):
+    """Найти пользователя по логину."""
+    return users_collection.find_one({"login": login})
+
+
+def print_note_short(note: dict):
+    """Краткий вывод информации о заметке."""
+    created = note.get("created_at")
+    created_str = created.strftime("%Y-%m-%d %H:%M:%S") if isinstance(created, datetime) else "неизвестно"
+    print(f"- {note.get('title')} "
+          f"(частей: {len(note.get('parts', []))}, "
+          f"создана: {created_str}, id: {note.get('_id')})")
+
+
+def print_note_full(note: dict):
+    """Полный вывод заметки со всеми частями."""
+    if not note:
+        print("Заметка не найдена.")
+        return
+
+    print("\n=== Полная информация о заметке ===")
+    print(f"ID:         {note.get('_id')}")
+    print(f"Название:   {note.get('title')}")
+    created = note.get("created_at")
+    updated = note.get("updated_at")
+    print(f"Создана:    {created.strftime('%Y-%m-%d %H:%M:%S') if isinstance(created, datetime) else 'неизвестно'}")
+    if updated:
+        print(f"Обновлена:  {updated.strftime('%Y-%m-%d %H:%M:%S') if isinstance(updated, datetime) else 'неизвестно'}")
+
+    tags = note.get("tags", [])
+    if tags:
+        print(f"Теги:       {', '.join(tags)}")
+
+    parts = note.get("parts", [])
+    if not parts:
+        print("\n(У заметки пока нет частей.)")
+    else:
+        print("\nЧасти заметки:")
+        for idx, part in enumerate(parts, start=1):
+            p_created = part.get("created_at")
+            p_created_str = p_created.strftime("%Y-%m-%d %H:%M:%S") if isinstance(p_created, datetime) else "неизвестно"
+            print("----------------------------------------")
+            print(f"Часть {idx} (добавлена: {p_created_str})")
+            print(part.get("text", ""))
+        print("----------------------------------------")
+    print("=======================================")
+
+
+def choose_note_for_user(current_user: dict):
+    """Выбор заметки пользователя по названию (поиск по подстроке)."""
+    query = input_non_empty("Введите часть названия заметки: ")
+    cursor = notes_collection.find({
+        "user_id": current_user["_id"],
+        "title": {"$regex": query, "$options": "i"}
+    }).sort("created_at", -1)
+
+    notes = list(cursor)
+    if not notes:
+        print("Заметок с таким названием не найдено.")
+        return None
+
+    print("\nНайденные заметки:")
+    for idx, n in enumerate(notes, start=1):
+        print(f"{idx}. ", end="")
+        print_note_short(n)
+
+    while True:
+        try:
+            choice = int(input("Выберите номер заметки (0 - отмена): "))
+        except ValueError:
+            print("Введите число.")
+            continue
+
+        if choice == 0:
+            return None
+        if 1 <= choice <= len(notes):
+            return notes[choice - 1]
+        print("Некорректный выбор, попробуйте снова.")
+
+
+# ---------- РЕГИСТРАЦИЯ И ВХОД ----------
+
+def register_user():
+    """Регистрация нового пользователя."""
+    print("\n=== Регистрация пользователя ===")
+    while True:
+        login = input_non_empty("Придумайте логин: ")
+        if find_user_by_login(login):
+            print("Такой логин уже существует. Выберите другой.")
+        else:
+            break
+
+    password = getpass("Придумайте пароль: ")
+    password_confirm = getpass("Повторите пароль: ")
+
+    if password != password_confirm:
+        print("Пароли не совпадают. Регистрация отменена.")
+        return None
+
+    user_doc = {
+        "login": login,
+        "password": password,  # в учебном примере не хэшируем
+        "created_at": datetime.utcnow()
+    }
+    users_collection.insert_one(user_doc)
+    print("Пользователь успешно зарегистрирован.")
+    return user_doc
+
+
+def login_user():
+    """Вход по логину и паролю."""
+    print("\n=== Вход в систему ===")
+    login = input_non_empty("Логин: ")
+    password = getpass("Пароль: ")
+
+    user = find_user_by_login(login)
+    if not user or user.get("password") != password:
+        print("Неверный логин или пароль.")
+        return None
+
+    print(f"Добро пожаловать, {user.get('login')}!")
+    return user
+
+
+# ---------- ОПЕРАЦИИ С ЗАМЕТКАМИ ----------
+
+def add_note(current_user: dict):
+    """Добавление новой заметки (с первой частью)."""
+    print("\n=== Добавление новой заметки ===")
+    title = input_non_empty("Название заметки: ")
+    text = input_non_empty("Текст первой части заметки: ")
+    tags_str = input("Теги (через запятую, можно пусто): ").strip()
+    tags = [t.strip() for t in tags_str.split(",") if t.strip()] if tags_str else []
+
+    now = datetime.utcnow()
+    note_doc = {
+        "user_id": current_user["_id"],
+        "title": title,
+        "created_at": now,
+        "updated_at": now,
+        "tags": tags,
+        "parts": [
+            {
+                "text": text,
+                "created_at": now
+            }
+        ]
+    }
+
+    result = notes_collection.insert_one(note_doc)
+    print(f"Заметка добавлена (id: {result.inserted_id})")
+
+
+def add_part_to_note(current_user: dict):
+    """Добавить новую часть к уже существующей заметке."""
+    print("\n=== Добавление части к заметке ===")
+    note = choose_note_for_user(current_user)
+    if not note:
+        return
+
+    text = input_non_empty("Текст новой части: ")
+    part_doc = {
+        "text": text,
+        "created_at": datetime.utcnow()
+    }
+
+    notes_collection.update_one(
+        {"_id": note["_id"]},
+        {
+            "$push": {"parts": part_doc},
+            "$set": {"updated_at": datetime.utcnow()}
+        }
+    )
+    print("Часть добавлена.")
+
+
+def delete_note(current_user: dict):
+    """Удаление заметки целиком."""
+    print("\n=== Удаление заметки ===")
+    note = choose_note_for_user(current_user)
+    if not note:
+        return
+
+    print_note_full(note)
+    if yes_no("Удалить эту заметку?"):
+        notes_collection.delete_one({"_id": note["_id"]})
+        print("Заметка удалена.")
+    else:
+        print("Удаление отменено.")
+
+
+def edit_note(current_user: dict):
+    """Редактирование заметки (название, теги, части)."""
+    print("\n=== Редактирование заметки ===")
+    note = choose_note_for_user(current_user)
+    if not note:
+        return
+
+    print_note_full(note)
+    print("\nВведите новые значения (Enter — оставить без изменений).")
+
+    new_title = input(f"Название [{note.get('title')}]: ").strip()
+    tags_str = input(f"Теги [{', '.join(note.get('tags', []))}]: ").strip()
+
+    update_fields = {}
+    if new_title:
+        update_fields["title"] = new_title
+    if tags_str:
+        tags = [t.strip() for t in tags_str.split(",") if t.strip()]
+        update_fields["tags"] = tags
+
+    # Редактирование частей (по желанию)
+    if note.get("parts") and yes_no("Хотите отредактировать части заметки?"):
+        parts = note["parts"]
+        print("\nСписок частей:")
+        for idx, part in enumerate(parts, start=1):
+            print(f"{idx}. {part.get('text')[:50]}...")
+
+        try:
+            idx_to_edit = int(input("Введите номер части для редактирования (0 - не изменять): "))
+        except ValueError:
+            idx_to_edit = 0
+
+        if 1 <= idx_to_edit <= len(parts):
+            old_text = parts[idx_to_edit - 1].get("text", "")
+            print(f"Текущий текст части:\n{old_text}")
+            new_part_text = input("Новый текст (Enter — оставить без изменений): ").strip()
+            if new_part_text:
+                parts[idx_to_edit - 1]["text"] = new_part_text
+                parts[idx_to_edit - 1]["created_at"] = datetime.utcnow()  # перезаписываем дату изменения
+                update_fields["parts"] = parts
+
+    if not update_fields:
+        print("Изменений нет.")
+        return
+
+    update_fields["updated_at"] = datetime.utcnow()
+    notes_collection.update_one(
+        {"_id": note["_id"]},
+        {"$set": update_fields}
+    )
+    updated = notes_collection.find_one({"_id": note["_id"]})
+    print("Заметка обновлена.")
+    print_note_full(updated)
+
+
+def show_all_notes(current_user: dict):
+    """Показ всех заметок пользователя."""
+    print("\n=== Все ваши заметки ===")
+    cursor = notes_collection.find({"user_id": current_user["_id"]}).sort("created_at", -1)
+    notes = list(cursor)
+    if not notes:
+        print("Заметок нет.")
+        return
+
+    for n in notes:
+        print_note_short(n)
+
+
+def show_note(current_user: dict):
+    """Просмотр одной заметки (все части)."""
+    print("\n=== Просмотр заметки ===")
+    note = choose_note_for_user(current_user)
+    if note:
+        print_note_full(note)
+
+
+def parse_date(date_str: str):
+    """Разбор строки вида YYYY-MM-DD в datetime.date (без времени)."""
+    try:
+        return datetime.strptime(date_str, "%Y-%m-%d")
+    except ValueError:
+        return None
+
+
+def show_notes_by_period(current_user: dict):
+    """Просмотр заметок за определённый период времени (по дате создания)."""
+    print("\n=== Заметки за период ===")
+    date_from_str = input_non_empty("Дата начала (формат YYYY-MM-DD): ")
+    date_to_str = input_non_empty("Дата конца (формат YYYY-MM-DD): ")
+
+    dt_from = parse_date(date_from_str)
+    dt_to = parse_date(date_to_str)
+
+    if not dt_from or not dt_to:
+        print("Одна из дат введена некорректно.")
+        return
+
+    # Сделаем dt_to концом дня
+    dt_to = dt_to.replace(hour=23, minute=59, second=59)
+
+    cursor = notes_collection.find({
+        "user_id": current_user["_id"],
+        "created_at": {"$gte": dt_from, "$lte": dt_to}
+    }).sort("created_at", -1)
+
+    notes = list(cursor)
+    if not notes:
+        print("Заметок в этом периоде не найдено.")
+        return
+
+    print(f"\nЗаметки с {date_from_str} по {date_to_str}:")
+    for n in notes:
+        print_note_short(n)
+
+
+def show_notes_by_words(current_user: dict):
+    """Отображение заметок, содержащих набор заданных слов (по тексту частей)."""
+    print("\n=== Поиск заметок по словам ===")
+    words_str = input_non_empty("Введите слова через пробел: ")
+    words = [w.lower() for w in words_str.split() if w.strip()]
+    if not words:
+        print("Слова не введены.")
+        return
+
+    cursor = notes_collection.find({"user_id": current_user["_id"]})
+    notes = list(cursor)
+
+    matched = []
+    for n in notes:
+        parts = n.get("parts", [])
+        full_text = " ".join(p.get("text", "") for p in parts).lower()
+        if all(word in full_text for word in words):
+            matched.append(n)
+
+    if not matched:
+        print("Заметок, содержащих все указанные слова, не найдено.")
+        return
+
+    print("\nНайденные заметки:")
+    for n in matched:
+        print_note_short(n)
+
+
+# ---------- МЕНЮ ПОЛЬЗОВАТЕЛЯ ----------
+
+def notebook_menu(current_user: dict):
+    """Меню приложения после входа пользователя."""
+    while True:
+        print("\n===== МЕНЮ «Записная книжка» =====")
+        print("1. Добавить заметку")
+        print("2. Добавить часть к заметке")
+        print("3. Удалить заметку")
+        print("4. Редактировать заметку")
+        print("5. Показать все заметки")
+        print("6. Просмотреть одну заметку")
+        print("7. Заметки за период")
+        print("8. Поиск заметок по словам")
+        print("0. Выйти из аккаунта")
+        choice = input("Выберите пункт меню: ").strip()
+
+        if choice == "1":
+            add_note(current_user)
+        elif choice == "2":
+            add_part_to_note(current_user)
+        elif choice == "3":
+            delete_note(current_user)
+        elif choice == "4":
+            edit_note(current_user)
+        elif choice == "5":
+            show_all_notes(current_user)
+        elif choice == "6":
+            show_note(current_user)
+        elif choice == "7":
+            show_notes_by_period(current_user)
+        elif choice == "8":
+            show_notes_by_words(current_user)
+        elif choice == "0":
+            print("Выход из аккаунта.")
+            return
+        else:
+            print("Некорректный пункт меню, попробуйте ещё раз.")
+
+
+# ---------- ГЛАВНОЕ МЕНЮ ПРИЛОЖЕНИЯ ----------
+
+def main_menu():
+    """Главное меню приложения."""
+    print("=== Приложение «Записная книжка» (MongoDB) ===")
+    while True:
+        print("\n===== ГЛАВНОЕ МЕНЮ =====")
+        print("1. Войти (логин и пароль)")
+        print("2. Зарегистрировать нового пользователя")
+        print("0. Выход")
+        choice = input("Выберите пункт меню: ").strip()
+
+        if choice == "1":
+            user = login_user()
+            if user:
+                notebook_menu(user)
+        elif choice == "2":
+            new_user = register_user()
+            if new_user:
+                notebook_menu(new_user)
+        elif choice == "0":
+            print("Завершение работы приложения.")
+            break
+        else:
+            print("Некорректный пункт меню, попробуйте ещё раз.")
+
+
+if __name__ == "__main__":
+    main_menu()
